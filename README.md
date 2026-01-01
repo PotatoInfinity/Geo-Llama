@@ -1,7 +1,7 @@
 # **Geo-Llama: Towards Structural Intelligence via Conformal Manifolds and $Cl_{4,1}$ Recursive Isometries**
 ![alt text](https://img.shields.io/badge/version-1.0.0--initial-blue) ![alt text](https://img.shields.io/badge/tech-Rust%20%7C%20C++%20%7C%20-blue) ![alt text](https://img.shields.io/badge/AI-Llama-blue)
 
-**Date:** December 31, 2025  
+**Date:** January 1st, 2026  
 **Author:** Trương Minh Huy  
 **Affiliation:** Advanced Geometric Intelligence Research (AGIR)  
 **Subject:** Geometric Deep Learning, High-Performance Computing, Structural Linguistics  
