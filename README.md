@@ -3,9 +3,7 @@
 **Date:** January 1st, 2026  
 **Author:** Trương Minh Huy  
 **Subject:** Geometric Deep Learning, High-Performance Computing, Structural Linguistics  
-
----
-<img width="2598" height="1406" alt="image" src="https://github.com/user-attachments/assets/3fc0b60a-0a20-47f1-82e3-171688c2944e" />
+![alt text](https://img.shields.io/badge/version-1.0.0--initial-blue) ![alt text](https://img.shields.io/badge/tech-Rust-blue) ![alt text](https://img.shields.io/badge/AI-Llama_3.2_1B-blue)
 
 ---
 
