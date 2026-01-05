@@ -404,23 +404,33 @@ class GeoLlamaHybrid:
             if self.tokenizer.pad_token is None:
                 self.tokenizer.pad_token = self.tokenizer.eos_token
             
+            # 1. RESET STATE FOR NEW GENERATION (The Fix)
+            # Get batch size from input
+            bsz = inputs['input_ids'].shape[0]
+            self.state.reset_state(batch_size=bsz)
+            
             # Pre-Generation G-Stream Sync
-            # We run a forward pass to update PSI before generating header
             with torch.no_grad():
                 outputs = self.model(**inputs, output_hidden_states=True)
             last_hidden_state = outputs.hidden_states[-1]
         else:
+            # Mock logic...
+            bsz = 1
+            self.state.reset_state(batch_size=bsz)
             inputs = {}
             print(f"Mocking Forward Pass for prompt: '{prompt}'")
             last_hidden_state = torch.randn(1, 5, self.d_model).to(self.device)
             
         # Update the Geometric State (Right Brain)
-        rotors = self.lifter(last_hidden_state) 
+        rotors = self.lifter(last_hidden_state) # (Batch, Seq, Heads, 32)
         
         # Recursive Context Update
         seq_len = rotors.shape[1]
+        
+        # We must update time-step by time-step to respect causality
         for t in range(seq_len):
-            self.state.update(rotors[0, t], mixing_layer=self.mixing_layer)
+            # rotors[:, t] is (Batch, Heads, 32)
+            self.state.update(rotors[:, t], mixing_layer=self.mixing_layer)
             
         print(f"Structural Context PSI synchronized across {self.target_geo_heads} manifolds.")
         
@@ -689,24 +699,28 @@ def exp_map(bivector_batch):
     """
     Maps a batch of bivectors to Rotors using the exponential map.
     R = exp(B) approx 1 + B + B^2/2! + ...
-    bivector_batch: (..., 32)
     """
     is_torch = hasattr(bivector_batch, 'device')
     if is_torch:
         import torch
         identity = torch.zeros_like(bivector_batch)
         identity[..., 0] = 1.0
+        
+        # STABILITY FIX: Clamp bivector magnitude
+        # Taylor series diverges if ||B|| is large.
+        # We treat large rotations as multiple small ones or just clamp.
+        B = torch.clamp(bivector_batch, min=-1.0, max=1.0) 
+        
         # Taylor expansion (3rd order for better precision)
-        B = bivector_batch
         B2 = batch_geometric_product(B, B)
         B3 = batch_geometric_product(B2, B)
         return identity + B + (B2 * 0.5) + (B3 * (1.0/6.0))
     else:
+        # Numpy implementation (keep as is)
         identity = np.zeros(bivector_batch.shape, dtype=np.float32)
         identity[..., 0] = 1.0
         B = bivector_batch
         B2 = batch_geometric_product(B, B)
-        # B3 = batch_geometric_product(B2, B) # Skipping for numpy speed in PoC
         return identity + B + (B2 * 0.5)
 
 def inverse(R):
@@ -867,68 +881,72 @@ from .cga import (
 class ManifoldMixingLayer(nn.Module):
     """
     Implements 'Manifold Mixing' (Section 9.2).
-    Allows information to bleed between the 64 parallel rotors to solve the Binding Problem.
     """
     def __init__(self, num_heads=64):
         super().__init__()
         self.num_heads = num_heads
-        # Mixing matrix: (64, 64)
-        # We process (64, 32) -> (32, 64) -> Linear -> (32, 64) -> (64, 32)
         self.mixer = nn.Linear(num_heads, num_heads, bias=False)
         
-        # Initialize near Identity to preserve independent manifolds initially
         with torch.no_grad():
             self.mixer.weight.copy_(torch.eye(num_heads))
-            # Add small noise to allow gradient flow
             self.mixer.weight.add_(torch.randn(num_heads, num_heads) * 0.01)
 
     def forward(self, psi):
-        # psi: (num_heads, 32)
-        # Transpose to mix heads
-        psi_t = psi.t() # (32, 64)
+        # psi: (Batch, Heads, 32)
+        # Transpose to mix heads: (Batch, 32, Heads)
+        psi_t = psi.transpose(1, 2) 
         mixed_t = self.mixer(psi_t)
-        return mixed_t.t() # (64, 32)
+        return mixed_t.transpose(1, 2) # Back to (Batch, Heads, 32)
 
-class GeoLlamaState:
+class GeoLlamaState(nn.Module):
     """
     Maintains the structural context PSI (Context Rotor) for the Geo-Llama stream.
+    Now supports Batched Backpropagation (TBPTT).
     """
     def __init__(self, num_heads=64, d_model=2048, device='cpu'):
+        super().__init__()
         self.num_heads = num_heads
         self.d_model = d_model
         self.device = device
-        # PSI is a collection of 64 rotors, each with 32 components.
-        # Initialized to identity (Scalar 1.0)
-        self.psi = torch.zeros((num_heads, 32), device=device)
-        self.psi[:, 0] = 1.0
+        # PSI is not a Parameter, it's a buffer (state)
+        # Shape: (Batch, Heads, 32) - Initialized to None until reset
+        self.psi = None 
+
+    def reset_state(self, batch_size=1):
+        """Initializes PSI to Identity (Scalar=1) for a new batch."""
+        self.psi = torch.zeros((batch_size, self.num_heads, 32), device=self.device)
+        self.psi[:, :, 0] = 1.0 # Scalar part = 1
+        return self.psi
 
     def update(self, rotors, mixing_layer=None):
         """
-        Recursive Rotor Accumulation (Sandwich Product): PSI_t = R_t * PSI_t-1 * R_t_inv
-        rotors: torch tensor of shape (num_heads, 32)
-        mixing_layer: Optional ManifoldMixingLayer
+        Recursive Rotor Accumulation: PSI_t = R_t * PSI_t-1 * R_t_inv
+        rotors: (Batch, Heads, 32)
         """
+        if self.psi is None:
+            # Auto-init if not reset (assumes batch size from rotors)
+            self.reset_state(batch_size=rotors.shape[0])
+
         # 1. Inverse of the incoming rotors
         rotors_inv = inverse(rotors)
         
         # 2. Update PSI: PSI = R * PSI * R_inv
-        # This preserves the geometric object's properties as it 'moves'
+        # batch_geometric_product handles (Batch, Heads, 32)
         temp = batch_geometric_product(rotors, self.psi)
-        self.psi = batch_geometric_product(temp, rotors_inv)
+        new_psi = batch_geometric_product(temp, rotors_inv)
         
         # 3. Manifold Correction (Drift Mitigation)
-        self.psi = normalize_rotor(self.psi)
+        # Crucial: We normalize BEFORE saving state to keep gradients stable
+        new_psi = normalize_rotor(new_psi)
         
-        # 4. Manifold Mixing (Section 9.2 - Binding Problem Solution)
+        # 4. Manifold Mixing
         if mixing_layer is not None:
-            self.psi = mixing_layer(self.psi)
-            self.psi = normalize_rotor(self.psi) # Ensure we stay on manifold
+            new_psi = mixing_layer(new_psi)
+            new_psi = normalize_rotor(new_psi)
         
-        # 5. Detach from graph to prevent infinite memory growth during inference
-        self.psi = self.psi.detach()
-
-    def normalize(self):
-        self.psi = normalize_rotor(self.psi)
+        # 5. Save state (NO DETACH - preserves gradient graph)
+        self.psi = new_psi
+        return self.psi
 
 class SpecializedLiftingLayer(nn.Module):
     """
@@ -980,23 +998,26 @@ class SpecializedLiftingLayer(nn.Module):
         # Map to full 32-lane multivectors
         B_full = torch.zeros(batch_size, seq_len, 64, 32, device=device, dtype=dtype)
         
-        # Syntax mapping (Head 0-9): 10 Bivectors
+        # Syntax mapping
         for i, idx in enumerate(BIVECTOR_INDICES):
             B_full[..., 0:10, idx] = syn_out[..., i]
             
-        # Semantic mapping (Head 10-39): 5 Vectors + 10 Bivectors
+        # Semantic mapping
         for i, idx in enumerate(VECTOR_INDICES):
             B_full[..., 10:40, idx] = sem_out[..., i]
         for i, idx in enumerate(BIVECTOR_INDICES):
             B_full[..., 10:40, idx] = sem_out[..., i + 5]
             
-        # Narrative mapping (Head 40-63): 10 Bivectors + 5 Quadvectors
+        # Narrative mapping
         for i, idx in enumerate(BIVECTOR_INDICES):
             B_full[..., 40:64, idx] = nar_out[..., i]
         for i, idx in enumerate(QUADVECTOR_INDICES):
             B_full[..., 40:64, idx] = nar_out[..., i + 10]
             
-        # Map to Rotors
+        # Map to Rotors (Using updated exp_map from cga.py)
+        # Apply tanh to clamp magnitudes before exp_map for stability
+        B_full = torch.tanh(B_full) * 3.14159  # Clamp to +/- PI
+        
         Rotors = exp_map(-B_full / 2.0)
         return Rotors
     
@@ -1008,28 +1029,17 @@ class GeometricLiftingLayer(SpecializedLiftingLayer):
     pass
 
 def geometry_conditioned_attention_bias(psi, Q_lifted, K_lifted, lambda_val=0.1):
-    """
-    Computes the GCA bias: lambda * <PSI, Q ^ K>
-    psi: (num_heads, 32)
-    Q_lifted: (batch, n_heads, seq_len, 32)
-    K_lifted: (batch, n_heads, seq_len, 32)
-    """
+    # (Keep your existing function, it works fine for logic)
     from .cga import batch_wedge_product, batch_inner_product
-    
-    # 1. Pairwise relationship plane
-    # (batch, n_heads, seq_len, 1, 32) ^ (batch, n_heads, 1, seq_len, 32)
     rel_plane = batch_wedge_product(Q_lifted.unsqueeze(3), K_lifted.unsqueeze(2))
     
-    # 2. Agreement with PSI
-    # psi: (batch, n_heads, 32) or (n_heads, 32)
-    # Ensure psi matches heads in rel_plane: (batch, n_heads, seq, seq, 32)
-    if psi.dim() == 2:
-        psi_exp = psi.view(1, psi.shape[0], 1, 1, 32)
-    else:
+    # Broadcast psi: (Batch, Heads, 1, 1, 32)
+    if psi.dim() == 3: # (Batch, Heads, 32)
         psi_exp = psi.view(psi.shape[0], psi.shape[1], 1, 1, 32)
+    elif psi.dim() == 2: # Old (Heads, 32) fallback
+        psi_exp = psi.view(1, psi.shape[0], 1, 1, 32)
         
     bias = batch_inner_product(psi_exp, rel_plane)
-    
     return lambda_val * bias
 ```
 
@@ -1245,8 +1255,11 @@ def gca_attention_forward(
         key_states = torch.repeat_interleave(key_states, dim=1, repeats=num_heads // num_kv_heads)
         value_states = torch.repeat_interleave(value_states, dim=1, repeats=num_heads // num_kv_heads)
     
-    # RoPE (omitted for brevity in PoC, but should be applied)
-    # query_states, key_states = apply_rope(query_states, key_states, ...)
+    # --- THE FIX: APPLY ROPE ---
+    cos, sin = self.rotary_emb(value_states, position_ids)
+    from transformers.models.llama.modeling_llama import apply_rotary_pos_emb
+    query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+    # ---------------------------
     
     # 2. Standard Attention Scores
     attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / (self.head_dim**0.5)
