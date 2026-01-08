@@ -11,7 +11,7 @@ EMBED_DIM = 8
 N_HEADS = 2
 N_LAYERS = 1
 N_CLASSES = 3
-BATCH_SIZE = 8 # Reduced batch size slightly for sequence recursion
+BATCH_SIZE = 8 
 EPOCHS = 5
 LR = 0.001
 
