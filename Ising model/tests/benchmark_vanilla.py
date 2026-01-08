@@ -7,8 +7,8 @@ import os
 import sys
 import numpy as np
 import time
-#torch.manual_seed(42)
-#np.random.seed(42) # For reproducibility
+torch.manual_seed(24)
+np.random.seed(24) # For reproducibility
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from geo_transformer.core import conformal_lift
@@ -46,13 +46,16 @@ class VanillaTransformer(nn.Module):
 def count_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
-def train_model(model, train_loader, val_loader, model_name, early_stop=False):
+def train_model(model, train_loader, val_loader, model_name):
     print(f"\n--- Training {model_name} ---")
     optimizer = optim.Adam(model.parameters(), lr=LR)
     criterion = nn.CrossEntropyLoss()
     
     history = {'train_loss': [], 'train_acc': [], 'val_loss': [], 'val_acc': []}
     start_time = time.time()
+    
+    best_val_acc = -1.0
+    best_state = None
     
     for epoch in range(EPOCHS):
         model.train()
@@ -96,12 +99,17 @@ def train_model(model, train_loader, val_loader, model_name, early_stop=False):
         history['val_loss'].append(val_loss)
         history['val_acc'].append(val_acc)
         
-        print(f"Epoch {epoch+1:2d} | Train Loss: {train_loss:.4f} | Val Acc: {val_acc:.4f}")
+        # Update Best State
+        if val_acc > best_val_acc:
+            best_val_acc = val_acc
+            best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
         
-        # Absolute Limit Early Stopping
-        if early_stop and val_acc >= 0.9667:
-            print(f"--- Absolute Limit (96.67%) hit for {model_name}. Terminating. ---")
-            break
+        print(f"Epoch {epoch+1:2d} | Train Loss: {train_loss:.4f} | Val Acc: {val_acc:.4f} | Best: {best_val_acc:.4f}")
+        
+    # Restore Best State
+    if best_state is not None:
+        model.load_state_dict(best_state)
+        print(f"--- Best State restored for {model_name} (Acc: {best_val_acc:.4f}) ---")
         
     elapsed = time.time() - start_time
     print(f"{model_name} finished in {elapsed:.2f}s")
@@ -131,9 +139,6 @@ def run_benchmark():
     checkpoint = torch.load(data_path)
     X_raw, Y = checkpoint['data'], checkpoint['labels']
     
-    # Ask for interactive early stopping
-    ans = input("\nTerminate geo-llama training at absolute limit (96.67%)? (y/n): ")
-    early_stop = ans.lower().strip() == 'y'
     X_lifted = conformal_lift(X_raw.view(X_raw.shape[0], -1)) 
     X_input = X_lifted.unsqueeze(2).repeat(1, 1, EMBED_DIM, 1) 
     
@@ -165,9 +170,9 @@ def run_benchmark():
     print(f" - Vanilla:   {count_parameters(vanilla)}")
     
     # Train all
-    h_v = train_model(vanilla, train_loader, val_loader, "Vanilla", early_stop=early_stop)
-    h_gm = train_model(geo_mean, train_loader, val_loader, "Geo-Mean", early_stop=early_stop)
-    h_gr = train_model(geo_rotor, train_loader, val_loader, "Geo-Rotor", early_stop=early_stop)
+    h_v = train_model(vanilla, train_loader, val_loader, "Vanilla")
+    h_gm = train_model(geo_mean, train_loader, val_loader, "Geo-Mean")
+    h_gr = train_model(geo_rotor, train_loader, val_loader, "Geo-Rotor")
     
     # Evaluate
     acc_v = evaluate_detailed(vanilla, val_loader, "Vanilla")
