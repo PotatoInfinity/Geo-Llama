@@ -389,10 +389,8 @@ def run_cycle(name, model, size, d_vec, epochs=25, transfer_from=None):
 if __name__ == "__main__":
     print_header()
     
-    # SIZES = [8, 16, 32]
-    # EPOCH_MAP = {8: 20, 16: 30, 32: 40}
-    SIZES = [8]
-    EPOCH_MAP = {8: 20}
+    SIZES = [8, 16, 32]
+    EPOCH_MAP = {8: 20, 16: 30, 32: 40}
     D_VEC = 8 # Constant vector dim to allow weight transfer
     results = {}
     
