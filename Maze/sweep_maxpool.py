@@ -48,7 +48,7 @@ parser.add_argument('--sizes', type=int, nargs='+', default=[8, 16, 32, 64, 128]
 parser.add_argument('--d_vecs', type=int, nargs='+', default=[2, 4, 6, 8, 10, 12], help='Hidden vectors for capacity sweep')
 parser.add_argument('--repeats', type=int, default=N_REPEATS_DEFAULT, help='Independent curriculum trials')
 parser.add_argument('--epochs', type=int, default=40, help='Max training epochs per stage')
-parser.add_argument('--outfile', type=str, default='curriculum_sweep_results.json', help='Output file')
+parser.add_argument('--outfile', type=str, default='curriculum_sweep_maxpool_results.json', help='Output file')
 
 if ('ipykernel' in sys.modules or any('ipykernel' in arg for arg in sys.argv)) and not IS_CLUSTER:
     print("[INFO] Jupyter environment detected. Initializing with test parameters.")
@@ -209,7 +209,7 @@ class CGA_Transformer(nn.Module):
         for layer in self.layers:
             x = manifold_normalization(x + layer['attn'](x))
             x = manifold_normalization(x + layer['mlp'](x))
-        pooled = self.pool(x).mean(dim=1) 
+        pooled = self.pool(x).max(dim=1)[0] 
         pooled = torch.tanh(pooled).view(x.shape[0], -1)
         return self.head(pooled)
 
@@ -226,7 +226,7 @@ class Standard_Transformer(nn.Module):
         x = x.view(x.shape[0], x.shape[1], -1)
         x = self.input_proj(x) + self.pos_emb[:, :x.size(1), :]
         x = self.encoder(x)
-        return self.head(x.mean(dim=1))
+        return self.head(x.max(dim=1)[0])
 
 # =================================================================
 # 4. CURRICULUM UTILITIES
@@ -467,8 +467,8 @@ def plot_results(data_results, model_results):
     plt.xlabel('D_VEC'); plt.ylabel('Efficiency Ratio'); plt.title('Advantage vs. Params')
     plt.grid(True, alpha=0.3)
     
-    plt.tight_layout(); plt.savefig('curriculum_sweep_plots.png')
-    print("\n[INFO] Curriculum visualizations saved to: curriculum_sweep_plots.png")
+    plt.tight_layout(); plt.savefig('curriculum_sweep_maxpool_plots.png')
+    print("\n[INFO] Curriculum visualizations saved to: curriculum_sweep_maxpool_plots.png")
 
 if __name__ == "__main__":
     run_sweeps()
