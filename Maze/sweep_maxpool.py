@@ -209,7 +209,7 @@ class CGA_Transformer(nn.Module):
         for layer in self.layers:
             x = manifold_normalization(x + layer['attn'](x))
             x = manifold_normalization(x + layer['mlp'](x))
-        pooled = self.pool(x).max(dim=1)[0] 
+        pooled = vector_where_max_norm(self.pool(x))
         pooled = torch.tanh(pooled).view(x.shape[0], -1)
         return self.head(pooled)
 
